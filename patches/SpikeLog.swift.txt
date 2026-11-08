@@ -1,0 +1,80 @@
+
+// MARK: - SPIKE logger (ochki-proba). Дописан патчем в конец CameraViewModel.swift.
+
+/// Пишет каждые 10 с строку в Documents/spike-<дата>.log: кадров за период, всего кадров,
+/// заряд телефона, тепловое состояние, состояние приложения; плюс события по вызову `event`.
+/// Файл виден в «Файлах» (UIFileSharingEnabled в Info.plist).
+final class SpikeLog: @unchecked Sendable {
+  static let shared = SpikeLog()
+
+  private let lock = NSLock()
+  private var frames = 0
+  private var lastFrames = 0
+  private let started = Date()
+  private let fileURL: URL
+  private let queue = DispatchQueue(label: "ochki.spike.log")
+  private var timer: DispatchSourceTimer?
+  private let stamp: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "HH:mm:ss"
+    return f
+  }()
+
+  private init() {
+    let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "yyyyMMdd-HHmmss"
+    fileURL = docs.appendingPathComponent("spike-\(f.string(from: Date())).log")
+    write("start \(fileURL.lastPathComponent)")
+    Task { @MainActor in
+      UIDevice.current.isBatteryMonitoringEnabled = true
+    }
+    let t = DispatchSource.makeTimerSource(queue: queue)
+    t.schedule(deadline: .now() + 10, repeating: 10)
+    t.setEventHandler { [weak self] in self?.tick() }
+    t.resume()
+    timer = t
+  }
+
+  func frame() {
+    lock.lock()
+    frames += 1
+    lock.unlock()
+  }
+
+  func event(_ text: String) {
+    write("event \(text)")
+  }
+
+  private func tick() {
+    lock.lock()
+    let total = frames
+    let delta = total - lastFrames
+    lastFrames = total
+    lock.unlock()
+    let elapsed = Int(Date().timeIntervalSince(started))
+    let thermal = ProcessInfo.processInfo.thermalState.rawValue
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      let battery = Int(UIDevice.current.batteryLevel * 100)
+      let state = UIApplication.shared.applicationState.rawValue
+      self.write("tick t=\(elapsed)s frames=\(total) d10s=\(delta) battery=\(battery)% thermal=\(thermal) appState=\(state)")
+    }
+  }
+
+  private func write(_ line: String) {
+    let text = "\(stamp.string(from: Date())) \(line)\n"
+    queue.async { [fileURL] in
+      guard let data = text.data(using: .utf8) else { return }
+      if let handle = try? FileHandle(forWritingTo: fileURL) {
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+      } else {
+        try? data.write(to: fileURL)
+      }
+    }
+  }
+}
