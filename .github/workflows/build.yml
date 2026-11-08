@@ -1,0 +1,91 @@
+name: Сборка пробы
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'ci/**'
+      - 'README.md'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Исходники Meta (ветка main)
+        run: git clone --depth 1 https://github.com/meta/meta-wearables-dat-ios.git meta
+
+      - name: Xcode
+        run: |
+          ls -d /Applications/Xcode*.app || true
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XC" ]; then sudo xcode-select -s "$XC"; fi
+          xcodebuild -version
+          swift --version
+
+      - name: Патчи
+        run: python3 patches/apply.py meta/samples/CameraAccess
+
+      - name: Сборка без подписи
+        run: |
+          set -o pipefail
+          cd meta/samples/CameraAccess
+          xcodebuild -list -project CameraAccess.xcodeproj || true
+          xcodebuild -project CameraAccess.xcodeproj -scheme CameraAccess -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            -skipPackagePluginValidation -skipMacroValidation build 2>&1 \
+            | tee "$GITHUB_WORKSPACE/build.log" | grep -E "error:|BUILD|\*\* " || true
+          grep -q "BUILD SUCCEEDED" "$GITHUB_WORKSPACE/build.log"
+
+      - name: Упаковка IPA
+        run: |
+          APP=$(find meta/samples/CameraAccess/build/Build/Products -type d -name "CameraAccess.app" | head -1)
+          echo "app: $APP"
+          test -n "$APP"
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          zip -qr OchkiProba-unsigned.ipa Payload
+          ls -la OchkiProba-unsigned.ipa
+          plutil -p Payload/CameraAccess.app/Info.plist | grep -E "CFBundleIdentifier|CFBundleDisplayName|UIFileSharingEnabled" || true
+
+      - name: Релиз с IPA
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: proba-${{ github.run_number }}
+          name: Проба ${{ github.run_number }}
+          body: Неподписанный IPA примера Meta CameraAccess с патчами ochki-proba (фон не закрывает сессию, журнал spike-*.log). Подписать и поставить через Sideloadly.
+          files: |
+            OchkiProba-unsigned.ipa
+
+      - name: Журнал сборки в репозиторий
+        if: always()
+        run: |
+          mkdir -p ci
+          {
+            echo "run ${{ github.run_number }} status=${{ job.status }} $(date -u +%FT%TZ)"
+            echo
+            if [ -f build.log ]; then
+              echo "--- ошибки и итог:"
+              grep -E "error:|BUILD" build.log | head -80
+              echo
+              echo "--- хвост:"
+              tail -n 60 build.log
+            else
+              echo "build.log отсутствует (упало до сборки)"
+            fi
+          } > ci/last-build.log
+          git config user.name "ochki-ci"
+          git config user.email "ci@users.noreply.github.com"
+          git add ci/last-build.log
+          git commit -m "ci: журнал сборки ${{ github.run_number }} (${{ job.status }})" || exit 0
+          git push
