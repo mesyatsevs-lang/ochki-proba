@@ -6,6 +6,7 @@ on:
     paths-ignore:
       - 'ci/**'
       - 'README.md'
+      - '.github/workflows/build-openclaw-ios.yml'
   workflow_dispatch: {}
 
 permissions:

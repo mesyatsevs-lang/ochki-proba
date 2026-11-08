@@ -1,0 +1,91 @@
+name: Сборка официального OpenClaw iOS (ворота В11)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openclaw-ios.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-openclaw-ios
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Исходники OpenClaw
+        run: git clone --depth 1 https://github.com/openclaw/openclaw.git oc
+
+      - name: Xcode и XcodeGen
+        run: |
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XC" ]; then sudo xcode-select -s "$XC"; fi
+          xcodebuild -version
+          brew install xcodegen >/dev/null 2>&1 || brew install xcodegen
+          xcodegen --version
+
+      - name: Разведка проекта
+        run: |
+          cd oc/apps/ios
+          ls
+          sed -n '1,60p' project.yml
+          cp LocalSigning.xcconfig.example LocalSigning.xcconfig 2>/dev/null || true
+          xcodegen generate 2>&1 | tail -20
+          ls -d *.xcodeproj *.xcworkspace 2>/dev/null || true
+          PROJ=$(ls -d *.xcodeproj | head -1)
+          xcodebuild -list -project "$PROJ" 2>&1 | tee "$GITHUB_WORKSPACE/openclaw-ios-list.txt"
+
+      - name: Сборка без подписи
+        run: |
+          set -o pipefail
+          cd oc/apps/ios
+          PROJ=$(ls -d *.xcodeproj | head -1)
+          SCHEME=$(awk '/Schemes:/{f=1;next} f&&NF{print $1; exit}' "$GITHUB_WORKSPACE/openclaw-ios-list.txt")
+          echo "project=$PROJ scheme=$SCHEME"
+          xcodebuild -project "$PROJ" -scheme "$SCHEME" -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            -skipPackagePluginValidation -skipMacroValidation build 2>&1 \
+            | tee "$GITHUB_WORKSPACE/openclaw-ios-build.log" | grep -E "error:|BUILD|\*\* " || true
+          grep -q "BUILD SUCCEEDED" "$GITHUB_WORKSPACE/openclaw-ios-build.log"
+
+      - name: Упаковка IPA
+        run: |
+          APP=$(find oc/apps/ios/build/Build/Products -type d -name "*.app" -maxdepth 3 | grep -v -E "Watch|Extension|Widget" | head -1)
+          echo "app: $APP"; test -n "$APP"
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          zip -qr OpenClawIOS-unsigned.ipa Payload
+          ls -la OpenClawIOS-unsigned.ipa
+
+      - name: Релиз
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: openclaw-ios-${{ github.run_number }}
+          name: OpenClaw iOS (неподписанный) ${{ github.run_number }}
+          body: Официальное приложение OpenClaw (apps/ios из openclaw/openclaw), собрано без подписи для ворот В11.
+          files: |
+            OpenClawIOS-unsigned.ipa
+
+      - name: Журнал в репозиторий
+        if: always()
+        run: |
+          mkdir -p ci
+          {
+            echo "run ${{ github.run_number }} status=${{ job.status }} $(date -u +%FT%TZ)"
+            echo; echo "--- xcodebuild -list:"; cat openclaw-ios-list.txt 2>/dev/null || echo "нет"
+            echo; echo "--- ошибки и итог:"; grep -E "error:|BUILD" openclaw-ios-build.log 2>/dev/null | head -80 || echo "нет build.log"
+            echo; echo "--- хвост:"; tail -n 40 openclaw-ios-build.log 2>/dev/null || true
+          } > ci/last-openclaw-ios.log
+          git config user.name "ochki-ci"; git config user.email "ci@users.noreply.github.com"
+          git add ci/last-openclaw-ios.log
+          git commit -m "ci: журнал сборки OpenClaw iOS ${{ github.run_number }} (${{ job.status }})" || exit 0
+          git pull --rebase origin main || true
+          git push
