@@ -1,0 +1,12 @@
+run 1 status=failure 2026-11-08T20:32:06Z
+
+--- xcodebuild -list:
+Command line invocation:
+    /Applications/Xcode_26.6.app/Contents/Developer/usr/bin/xcodebuild -list -project 
+
+2026-11-08 20:32:06.037 xcodebuild[3411:14016] Writing error result bundle to /var/folders/h5/t85nd63d71x27_8gl5gw3l_w0000gn/T/ResultBundle_2026-08-11_20-32-0006.xcresult
+xcodebuild: error: '' is not a project file.
+
+--- ошибки и итог:
+
+--- хвост:
